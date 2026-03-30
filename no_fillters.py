@@ -6,12 +6,14 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ========= CONFIG =========
-BOT_TOKEN = "8617604781:AAHmq6ftwGm3IH1MLMuKp12d6aUaO5OTj40"
-API_KEY = "0ec7bbca0e1b77445868cbb792da48f3"
-API_URL = "https://smmtigers.com/api/v2"
 
-ADMIN_ID = 1130472857  # غيره لرقمك
-VODAFONE_NUMBER = "01092843642"
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_KEY = os.getenv("API_KEY")
+API_URL = os.getenv("API_URL")
+
+ADMIN_ID = os.getenv("ADMIN_ID")
+VODAFONE_NUMBER = os.getenv("VODAFONE_NUMBER")
 
 PROFIT_PERCENT = 2  # 200% ربح
 
