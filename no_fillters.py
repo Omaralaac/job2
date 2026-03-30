@@ -1,252 +1,269 @@
+
+import asyncio
+import sqlite3
 import requests
-from bs4 import BeautifulSoup
-import time
-import json
-import os
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==============================
-# 🔑 بيانات البوت
-# ==============================
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+# ========= CONFIG =========
+BOT_TOKEN = "8617604781:AAHmq6ftwGm3IH1MLMuKp12d6aUaO5OTj40"
+API_KEY = "0ec7bbca0e1b77445868cbb792da48f3"
+API_URL = "https://smmtigers.com/api/v2"
 
-if not TOKEN or not CHAT_ID:
-    print("❌ TOKEN or CHAT_ID not found!")
-    exit(1)
+ADMIN_ID = 1130472857  # غيره لرقمك
+VODAFONE_NUMBER = "01092843642"
 
-# ==============================
-# 📁 ملف حفظ المشاريع
-# ==============================
-SEEN_FILE = "seen.json"
+PROFIT_PERCENT = 2  # 200% ربح
 
-def load_seen():
-    if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-def save_seen(seen):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f)
+# ========= DATABASE =========
+conn = sqlite3.connect("bot.db")
+cur = conn.cursor()
 
-seen = load_seen()
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    balance REAL DEFAULT 0
+)
+""")
 
-# ==============================
-# 🆕 أول تشغيل (تجاهل القديم)
-# ==============================
-FIRST_RUN_FILE = "first_run_done.txt"
+cur.execute("""
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    service_id INTEGER,
+    link TEXT,
+    quantity INTEGER,
+    order_id INTEGER,
+    status TEXT
+)
+""")
 
-def is_first_run():
-    return not os.path.exists(FIRST_RUN_FILE)
+conn.commit()
 
-def mark_first_run_done():
-    with open(FIRST_RUN_FILE, "w") as f:
-        f.write("done")
+# ========= API =========
+def get_services():
+    return requests.post(API_URL, data={
+        "key": API_KEY,
+        "action": "services"
+    }).json()
 
-# ==============================
-# 📲 إرسال Telegram
-# ==============================
-def send_telegram(project):
+def create_order(service, link, quantity):
+    return requests.post(API_URL, data={
+        "key": API_KEY,
+        "action": "add",
+        "service": service,
+        "link": link,
+        "quantity": quantity
+    }).json()
+
+# ========= HELPERS =========
+def get_user(user_id):
+    cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    user = cur.fetchone()
+    if not user:
+        cur.execute("INSERT INTO users (user_id, balance) VALUES (?, ?)", (user_id, 0))
+        conn.commit()
+        return (user_id, 0)
+    return user
+
+def update_balance(user_id, amount):
+    cur.execute("UPDATE users SET balance=? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+
+def add_balance(user_id, amount):
+    cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+
+def deduct_balance(user_id, amount):
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+    bal = cur.fetchone()[0]
+
+    if bal < amount:
+        return False
+
+    cur.execute("UPDATE users SET balance=? WHERE user_id=?", (bal - amount, user_id))
+    conn.commit()
+    return True
+
+def calc_price(rate, quantity):
+    base = (float(rate) / 1000) * quantity
+    return round(base + (base * PROFIT_PERCENT), 4)
+
+def get_telegram_services():
+    services = get_services()
+    return [s for s in services if "telegram" in s["name"].lower()]
+
+# ========= START =========
+@dp.message(F.text == "/start")
+async def start(msg: types.Message):
+    get_user(msg.from_user.id)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 رصيدي", callback_data="balance")],
+        [InlineKeyboardButton(text="🛒 طلب جديد", callback_data="new")],
+        [InlineKeyboardButton(text="📦 طلباتي", callback_data="orders")],
+        [InlineKeyboardButton(text="💳 شحن رصيد", callback_data="charge")]
+    ])
+
+    await msg.answer("👋 أهلا بيك في بوت الخدمات", reply_markup=kb)
+
+# ========= BALANCE =========
+@dp.callback_query(F.data == "balance")
+async def balance(call: types.CallbackQuery):
+    user = get_user(call.from_user.id)
+    await call.message.answer(f"💰 رصيدك: {user[1]}$")
+
+# ========= CHARGE =========
+@dp.callback_query(F.data == "charge")
+async def charge(call: types.CallbackQuery):
+    await call.message.answer(
+        f"💳 حول على الرقم:\n{VODAFONE_NUMBER}\n\n"
+        "📸 ابعت صورة التحويل + اكتب المبلغ في الكابشن"
+    )
+
+# ========= PROOF =========
+@dp.message(F.photo)
+async def proof(msg: types.Message):
+    if msg.from_user.id == ADMIN_ID:
+        return
+
+    caption = msg.caption
+
+    if not caption or not caption.isdigit():
+        await msg.answer("❌ اكتب المبلغ في الكابشن")
+        return
+
+    amount = float(caption)
+
+    await bot.send_photo(
+        ADMIN_ID,
+        msg.photo[-1].file_id,
+        caption=f"طلب شحن\nID: {msg.from_user.id}\nAmount: {amount}"
+    )
+
+    await msg.answer("⏳ تم إرسال طلبك للأدمن")
+
+# ========= ADMIN CONFIRM =========
+@dp.message(F.text.startswith("/add"))
+async def admin_add(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        _, user_id, amount = msg.text.split()
+        add_balance(int(user_id), float(amount))
+        await msg.answer("✅ تم الشحن")
+    except:
+        await msg.answer("❌ صيغة غلط")
 
-        message = f"""🔥 *مشروع جديد*
+# ========= NEW ORDER =========
+user_state = {}
 
-🌐 *الموقع:* {project['site']}
-📌 *العنوان:* {project['title']}
-💰 *الميزانية:* {project['budget']}
-⏳ *المدة:* {project['duration']}
-"""
+@dp.callback_query(F.data == "new")
+async def new_order(call: types.CallbackQuery):
+    services = get_telegram_services()
 
-        data = {
-            "chat_id": CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps({
-                "inline_keyboard": [
-                    [
-                        {
-                            "text": "🔎 فتح المشروع",
-                            "url": project['link']
-                        }
-                    ]
-                ]
-            })
-        }
+    buttons = []
+    for s in services[:10]:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{s['name']} | {s['rate']}$",
+                callback_data=f"service_{s['service']}"
+            )
+        ])
 
-        requests.post(url, data=data)
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await call.message.answer("اختار الخدمة 👇", reply_markup=kb)
 
-    except Exception as e:
-        print("Telegram Error:", e)
+# ========= SELECT SERVICE =========
+@dp.callback_query(F.data.startswith("service_"))
+async def select_service(call: types.CallbackQuery):
+    service_id = int(call.data.split("_")[1])
+    user_state[call.from_user.id] = {"service": service_id}
 
-# ==============================
-# 🟢 Mostaql
-# ==============================
-def get_mostaql():
-    url = "https://mostaql.com/projects"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    await call.message.answer("🔗 ابعت اللينك")
 
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
+# ========= FLOW =========
+@dp.message()
+async def handle(msg: types.Message):
+    user_id = msg.from_user.id
 
-    projects = []
+    if user_id not in user_state:
+        return
 
-    for c in soup.select("h2 a"):
-        title = c.text.strip()
-        href = c["href"]
-        link = href if href.startswith("http") else "https://mostaql.com" + href
+    data = user_state[user_id]
 
-        # تفاصيل
+    # أول خطوة: اللينك
+    if "link" not in data:
+        data["link"] = msg.text
+        await msg.answer("📊 ابعت الكمية")
+        return
+
+    # التحقق من الكمية
+    if "quantity" not in data:
         try:
-            page = requests.get(link, headers=headers)
-            psoup = BeautifulSoup(page.text, "html.parser")
+            quantity = int(msg.text)  # يحاول يحول النص لرقم
+            if quantity <= 0:
+                raise ValueError  # لو الرقم صفر أو أقل، نعتبره خطأ
+            data["quantity"] = quantity
+        except ValueError:
+            await msg.answer("❌ من فضلك اكتب الرقم بشكل صحيح")
+            return  # يرجع للمستخدم لحد ما يكتب رقم صحيح
 
-            budget_span = psoup.select_one('div.meta-row:has(div.meta-label:contains("الميزانية")) span')
-            budget = budget_span.text.strip() if budget_span else "غير محدد"
+        # لو الرقم صح، يكمل
+        services = get_telegram_services()
+        service = next((s for s in services if s["service"] == data["service"]), None)
 
-            duration_div = psoup.select_one('div.meta-row:has(div.meta-label:contains("مدة التنفيذ")) div.meta-value')
-            duration = duration_div.text.strip() if duration_div else "غير محدد"
-        except:
-            budget = "غير محدد"
-            duration = "غير محدد"
+        price = calc_price(service["rate"], quantity)
 
-        projects.append({
-            "site": "Mostaql",
-            "title": title,
-            "link": link,
-            "budget": budget,
-            "duration": duration
-        })
+        if not deduct_balance(user_id, price):
+            await msg.answer("❌ رصيدك مش كفاية")
+            user_state.pop(user_id)
+            return
 
-    return projects
+        res = create_order(data["service"], data["link"], quantity)
 
-# ==============================
-# 🟡 Khamsat
-# ==============================
-def get_khamsat():
-    url = "https://khamsat.com/community/requests"
-    headers = {"User-Agent": "Mozilla/5.0"}
+        if "order" in res:
+            order_id = res["order"]
 
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
+            cur.execute("""
+                INSERT INTO orders (user_id, service_id, link, quantity, order_id, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, data["service"], data["link"], quantity, order_id, "Pending"))
+            conn.commit()
 
-    projects = []
+            await msg.answer(
+                f"✅ تم الطلب\n\n"
+                f"📦 ID: {order_id}\n"
+                f"💰 السعر: {price}$"
+            )
+        else:
+            await msg.answer("❌ فشل الطلب")
 
-    for c in soup.select("h3 a"):
-        title = c.text.strip()
-        link = "https://khamsat.com" + c["href"]
+        user_state.pop(user_id)
 
-        projects.append({
-            "site": "Khamsat",
-            "title": title,
-            "link": link,
-            "budget": "غير محدد",
-            "duration": "غير محدد"
-        })
+# ========= ORDERS =========
+@dp.callback_query(F.data == "orders")
+async def orders(call: types.CallbackQuery):
+    cur.execute("SELECT order_id, quantity, status FROM orders WHERE user_id=?", (call.from_user.id,))
+    rows = cur.fetchall()
 
-    return projects
+    if not rows:
+        await call.message.answer("❌ مفيش طلبات")
+        return
 
-# ==============================
-# 🔵 Baaeed
-# ==============================
-def get_baaeed():
-    url = "https://baaeed.com/jobs"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    text = "📦 طلباتك:\n\n"
+    for r in rows:
+        text += f"ID: {r[0]} | {r[1]} | {r[2]}\n"
 
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
+    await call.message.answer(text)
 
-    jobs = []
+# ========= RUN =========
+async def main():
+    print("Bot Started...")
+    await dp.start_polling(bot)
 
-    for c in soup.select("h2 a"):
-        title = c.text.strip()
-        link = "https://baaeed.com" + c["href"]
-
-        jobs.append({
-            "site": "Baaeed",
-            "title": title,
-            "link": link,
-            "budget": "غير محدد",
-            "duration": "غير محدد"
-        })
-
-    return jobs
-
-# ==============================
-# 🟣 Guru
-# ==============================
-def get_guru():
-    url = "https://www.guru.com/work/online"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.text, "html.parser")
-
-    projects = []
-
-    for job in soup.select("li div.record.jobRecord"):
-        # العنوان
-        a_tag = job.select_one("h2.jobRecord__title a")
-        if not a_tag:
-            continue
-        title = a_tag.text.strip()
-        href = a_tag["href"].split("&")[0]  # تنظيف الرابط
-        link = "https://www.guru.com" + href
-
-        # الميزانية
-        budget_div = job.select_one("div.jobRecord__budget")
-        budget = budget_div.get_text(separator=" | ").strip() if budget_div else "غير محدد"
-
-        # المدة / الموعد النهائي
-        deadline_p = job.select_one("p.copy.small.grey")
-        duration = deadline_p.get_text(strip=True) if deadline_p else "غير محدد"
-
-        projects.append({
-            "site": "Guru",
-            "title": title,
-            "link": link,
-            "budget": budget,
-            "duration": duration
-        })
-
-    return projects
-
-# ==============================
-# 🌐 كل المواقع
-# ==============================
-SITES = [get_mostaql, get_khamsat, get_baaeed, get_guru]
-
-# ==============================
-# 🔁 تشغيل البوت
-# ==============================
-print("🚀 Bot is running (Multi Sites)...")
-
-while True:
-    all_projects = []
-
-    for site_func in SITES:
-        try:
-            all_projects.extend(site_func())
-        except Exception as e:
-            print("Site Error:", e)
-
-    # أول تشغيل: خزّن كل المشاريع بدون إرسال
-    if is_first_run():
-        print("⚡ First run: saving existing projects only...")
-        for p in all_projects:
-            seen.add(p["link"])
-        save_seen(seen)
-        mark_first_run_done()
-        print("✅ Done. Restarting loop...")
-        time.sleep(10)
-        continue
-
-    # التشغيل الطبيعي
-    for p in all_projects:
-        if p["link"] not in seen:
-            seen.add(p["link"])
-            save_seen(seen)
-            send_telegram(p)
-            time.sleep(3)
-
-    time.sleep(180)
+asyncio.run(main())
