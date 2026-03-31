@@ -6,13 +6,11 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ========= CONFIG =========
-
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("API_KEY")
 API_URL = os.getenv("API_URL")
 
-ADMIN_ID = os.getenv("ADMIN_ID")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 VODAFONE_NUMBER = os.getenv("VODAFONE_NUMBER")
 
 PROFIT_PERCENT = 2  # 200% ربح
@@ -66,9 +64,10 @@ def get_user(user_id):
     cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     user = cur.fetchone()
     if not user:
-        cur.execute("INSERT INTO users (user_id, balance) VALUES (?, ?)", (user_id, 0))
+        cur_id = int(user_id)
+        cur.execute("INSERT INTO users (user_id, balance) VALUES (?, ?)", (cur_id, 0))
         conn.commit()
-        return (user_id, 0)
+        return (cur_id, 0)
     return user
 
 def update_balance(user_id, amount):
@@ -134,8 +133,8 @@ async def proof(msg: types.Message):
 
     caption = msg.caption
 
-    if not caption or not caption.isdigit():
-        await msg.answer("❌ اكتب المبلغ في الكابشن")
+    if not caption or not caption.replace('.', '', 1).isdigit():
+        await msg.answer("❌ اكتب المبلغ في الكابشن بشكل صحيح")
         return
 
     amount = float(caption)
@@ -143,23 +142,29 @@ async def proof(msg: types.Message):
     await bot.send_photo(
         ADMIN_ID,
         msg.photo[-1].file_id,
-        caption=f"طلب شحن\nID: {msg.from_user.id}\nAmount: {amount}"
+        caption=f"طلب شحن\nID: {msg.from_user.id}\nAmount: {amount}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✅ تأكيد الشحن",
+                callback_data=f"confirm_{msg.from_user.id}_{amount}"
+            )]
+        ])
     )
 
     await msg.answer("⏳ تم إرسال طلبك للأدمن")
 
 # ========= ADMIN CONFIRM =========
-@dp.message(F.text.startswith("/add"))
-async def admin_add(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+@dp.callback_query(F.data.startswith("confirm_"))
+async def confirm_charge(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
         return
 
-    try:
-        _, user_id, amount = msg.text.split()
-        add_balance(int(user_id), float(amount))
-        await msg.answer("✅ تم الشحن")
-    except:
-        await msg.answer("❌ صيغة غلط")
+    _, user_id, amount = call.data.split("_")
+
+    add_balance(int(user_id), float(amount))
+
+    await call.message.edit_caption(call.message.caption + "\n\n✅ تم الشحن")
+    await bot.send_message(user_id, f"✅ تم إضافة {amount}$ إلى رصيدك")
 
 # ========= NEW ORDER =========
 user_state = {}
@@ -198,24 +203,21 @@ async def handle(msg: types.Message):
 
     data = user_state[user_id]
 
-    # أول خطوة: اللينك
     if "link" not in data:
         data["link"] = msg.text
         await msg.answer("📊 ابعت الكمية")
         return
 
-    # التحقق من الكمية
     if "quantity" not in data:
         try:
-            quantity = int(msg.text)  # يحاول يحول النص لرقم
+            quantity = int(msg.text)
             if quantity <= 0:
-                raise ValueError  # لو الرقم صفر أو أقل، نعتبره خطأ
+                raise ValueError
             data["quantity"] = quantity
         except ValueError:
             await msg.answer("❌ من فضلك اكتب الرقم بشكل صحيح")
-            return  # يرجع للمستخدم لحد ما يكتب رقم صحيح
+            return
 
-        # لو الرقم صح، يكمل
         services = get_telegram_services()
         service = next((s for s in services if s["service"] == data["service"]), None)
 
